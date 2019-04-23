@@ -32,96 +32,90 @@ except ImportError:
 _USE_MOD_FROM_GMP_SIZE = (1 << (8*2))
 
 
-# def powmod(a, b, c):
-
-#     if a == 1:
-#         return 1
-#     if not HAVE_GMP or max(a, b, c) < _USE_MOD_FROM_GMP_SIZE:
-#         return pow(a, b, c)
-#     else:
-#         return int(gmpy2.powmod(a, b, c))
-
-
-# def extended_euclidean_algorithm(a, b):
-
-#     r0, r1 = a, b
-#     s0, s1 = 1, 0
-#     t0, t1 = 0, 1
-#     while r1 != 0:
-#         q = r0 // r1
-#         r0, r1 = r1, r0 - q*r1
-#         s0, s1 = s1, s0 - q*s1
-#         t0, t1 = t1, t0 - q*t1
-#     return r0, s0, t0
+def powmod(a, b, c):
+    if a == 1:
+        return 1
+    if not HAVE_GMP or max(a, b, c) < _USE_MOD_FROM_GMP_SIZE:
+        return pow(a, b, c)
+    else:
+        return int(gmpy2.powmod(a, b, c))
 
 
-# def invert(a, b):
-
-#     if HAVE_GMP:
-#         s = int(gmpy2.invert(a, b))
-#         # according to documentation, gmpy2.invert might return 0 on
-#         # non-invertible element, although it seems to actually raise an
-#         # exception; for consistency, we always raise the exception
-#         if s == 0:
-#             raise ZeroDivisionError('invert() no inverse exists')
-#         return s
-#     else:
-#         r, s, _ = extended_euclidean_algorithm(a, b)
-#         if r != 1:
-#             raise ZeroDivisionError('invert() no inverse exists')
-#         return s % b
+def extended_euclidean_algorithm(a, b):
+    r0, r1 = a, b
+    s0, s1 = 1, 0
+    t0, t1 = 0, 1
+    while r1 != 0:
+        q = r0 // r1
+        r0, r1 = r1, r0 - q*r1
+        s0, s1 = s1, s0 - q*s1
+        t0, t1 = t1, t0 - q*t1
+    return r0, s0, t0
 
 
-# def getprimeover(N):
-
-#     if HAVE_GMP:
-#         randfunc = random.SystemRandom()
-#         r = gmpy2.mpz(randfunc.getrandbits(N))
-#         r = gmpy2.bit_set(r, N - 1)
-#         return int(gmpy2.next_prime(r))
-#     elif HAVE_CRYPTO:
-#         return number.getPrime(N, os.urandom)
-#     else:
-#         randfunc = random.SystemRandom()
-#         n = randfunc.randrange(2**(N-1), 2**N) | 1
-#         while not is_prime(n):
-#             n += 2
-#         return n
-
-
-# def isqrt(N):
-
-#     if HAVE_GMP:
-#         return int(gmpy2.isqrt(N))
-#     else:
-#         return improved_i_sqrt(N)
+def invert(a, b):
+    if HAVE_GMP:
+        s = int(gmpy2.invert(a, b))
+        # according to documentation, gmpy2.invert might return 0 on
+        # non-invertible element, although it seems to actually raise an
+        # exception; for consistency, we always raise the exception
+        if s == 0:
+            raise ZeroDivisionError('invert() no inverse exists')
+        return s
+    else:
+        r, s, _ = extended_euclidean_algorithm(a, b)
+        if r != 1:
+            raise ZeroDivisionError('invert() no inverse exists')
+        return s % b
 
 
-# def improved_i_sqrt(n):
+def getprimeover(N):
+    if HAVE_GMP:
+        randfunc = random.SystemRandom()
+        r = gmpy2.mpz(randfunc.getrandbits(N))
+        r = gmpy2.bit_set(r, N - 1)
+        return int(gmpy2.next_prime(r))
+    elif HAVE_CRYPTO:
+        return number.getPrime(N, os.urandom)
+    else:
+        randfunc = random.SystemRandom()
+        n = randfunc.randrange(2**(N-1), 2**N) | 1
+        while not is_prime(n):
+            n += 2
+        return n
 
-#     assert n >= 0
-#     if n == 0:
-#         return 0
-#     i = n.bit_length() >> 1    # i = floor( (1 + floor(log_2(n))) / 2 )
-#     m = 1 << i    # m = 2^i
-#     #
-#     # Fact: (2^(i + 1))^2 > n, so m has at least as many bits
-#     # as the floor of the square root of n.
-#     #
-#     # Proof: (2^(i+1))^2 = 2^(2i + 2) >= 2^(floor(log_2(n)) + 2)
-#     # >= 2^(ceil(log_2(n) + 1) >= 2^(log_2(n) + 1) > 2^(log_2(n)) = n. QED.
-#     #
-#     while (m << i) > n: # (m<<i) = m*(2^i) = m*m
-#         m >>= 1
-#         i -= 1
-#     d = n - (m << i) # d = n-m^2
-#     for k in range(i-1, -1, -1):
-#         j = 1 << k
-#         new_diff = d - (((m<<1) | j) << k) # n-(m+2^k)^2 = n-m^2-2*m*2^k-2^(2k)
-#         if new_diff >= 0:
-#             d = new_diff
-#             m |= j
-#     return m
+
+def isqrt(N):
+    if HAVE_GMP:
+        return int(gmpy2.isqrt(N))
+    else:
+        return improved_i_sqrt(N)
+
+
+def improved_i_sqrt(n):
+    assert n >= 0
+    if n == 0:
+        return 0
+    i = n.bit_length() >> 1    # i = floor( (1 + floor(log_2(n))) / 2 )
+    m = 1 << i    # m = 2^i
+    #
+    # Fact: (2^(i + 1))^2 > n, so m has at least as many bits
+    # as the floor of the square root of n.
+    #
+    # Proof: (2^(i+1))^2 = 2^(2i + 2) >= 2^(floor(log_2(n)) + 2)
+    # >= 2^(ceil(log_2(n) + 1) >= 2^(log_2(n) + 1) > 2^(log_2(n)) = n. QED.
+    #
+    while (m << i) > n: # (m<<i) = m*(2^i) = m*m
+        m >>= 1
+        i -= 1
+    d = n - (m << i) # d = n-m^2
+    for k in range(i-1, -1, -1):
+        j = 1 << k
+        new_diff = d - (((m<<1) | j) << k) # n-(m+2^k)^2 = n-m^2-2*m*2^k-2^(2k)
+        if new_diff >= 0:
+            d = new_diff
+            m |= j
+    return m
 
 # # base64 utils from jwcrypto
 
