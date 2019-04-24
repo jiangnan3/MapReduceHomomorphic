@@ -1,13 +1,12 @@
 #!/usr/bin/python3
 
+from operator import itemgetter
 
-
-
-
+# ------------------------------- Begin of the phe Library ------------------------------- #
 
 import fractions
 import math
-# import sys
+import sys
 
 
 import os
@@ -33,7 +32,6 @@ _USE_MOD_FROM_GMP_SIZE = (1 << (8*2))
 
 
 def powmod(a, b, c):
-
     if a == 1:
         return 1
     if not HAVE_GMP or max(a, b, c) < _USE_MOD_FROM_GMP_SIZE:
@@ -43,7 +41,6 @@ def powmod(a, b, c):
 
 
 def extended_euclidean_algorithm(a, b):
-
     r0, r1 = a, b
     s0, s1 = 1, 0
     t0, t1 = 0, 1
@@ -56,7 +53,6 @@ def extended_euclidean_algorithm(a, b):
 
 
 def invert(a, b):
-
     if HAVE_GMP:
         s = int(gmpy2.invert(a, b))
         # according to documentation, gmpy2.invert might return 0 on
@@ -73,7 +69,6 @@ def invert(a, b):
 
 
 def getprimeover(N):
-
     if HAVE_GMP:
         randfunc = random.SystemRandom()
         r = gmpy2.mpz(randfunc.getrandbits(N))
@@ -90,7 +85,6 @@ def getprimeover(N):
 
 
 def isqrt(N):
-
     if HAVE_GMP:
         return int(gmpy2.isqrt(N))
     else:
@@ -98,7 +92,6 @@ def isqrt(N):
 
 
 def improved_i_sqrt(n):
-
     assert n >= 0
     if n == 0:
         return 0
@@ -342,10 +335,7 @@ first_primes = [
 
 
 def miller_rabin(n, k):
-
     assert n > 3
-
-    # find r and d such that n-1 = 2^r × d
     d = n-1
     r = 0
     while d % 2 == 0:
@@ -353,10 +343,8 @@ def miller_rabin(n, k):
         r += 1
     assert n-1 == d * 2**r
     assert d % 2 == 1
-
     for _ in range(k):  # each iteration divides risk of false prime by 4
         a = random.randint(2, n-2)  # choose a random witness
-
         x = pow(a, d, n)
         if x == 1 or x == n-1:
             continue  # go to next witness
@@ -371,15 +359,12 @@ def miller_rabin(n, k):
 
 
 def is_prime(n, mr_rounds=25):
-
-    # as an optimization we quickly detect small primes using the list above
     if n <= first_primes[-1]:
         return n in first_primes
     # for small dividors (relatively frequent), euclidean division is best
     for p in first_primes:
         if n % p == 0:
             return False
-    # the actual generic test; give a false prime with probability 2⁻⁵⁰
     return miller_rabin(n, mr_rounds)
 
 
@@ -388,14 +373,7 @@ try:
 except ImportError:
     Mapping = dict
 
-# from phe import EncodedNumber
-# from phe.util import invert, powmod, getprimeover, isqrt
-
-# Paillier cryptosystem is based on integer factorisation.
-# The default is chosen to give a minimum of 128 bits of security.
-# https://www.keylength.com/en/4/
 DEFAULT_KEYSIZE = 3072
-
 
 def generate_paillier_keypair(private_keyring=None, n_length=DEFAULT_KEYSIZE):
 
@@ -409,13 +387,6 @@ def generate_paillier_keypair(private_keyring=None, n_length=DEFAULT_KEYSIZE):
         n = p * q
         n_len = n.bit_length()
 
-    # print("n: ")
-    # print(n)
-    # print("p: ")
-    # print(p)
-    # print("q: ")
-    # print(q)
-
     public_key = PaillierPublicKey(n)
     private_key = PaillierPrivateKey(public_key, p, q)
 
@@ -427,13 +398,11 @@ def generate_paillier_keypair(private_keyring=None, n_length=DEFAULT_KEYSIZE):
 
 
 class PaillierPrivateKeyring(Mapping):
-
     def __init__(self, private_keys=None):
         if private_keys is None:
             private_keys = []
         public_keys = [k.public_key for k in private_keys]
         self.__keyring = dict(zip(public_keys, private_keys))
-
     def __getitem__(self, key):
         return self.__keyring[key]
 
@@ -514,7 +483,7 @@ class EncodedNumber(object):
 
         # Wrap negative numbers by adding n
         return cls(public_key, int_rep % public_key.n, exponent)
-
+    #
     def decode(self):
 
         if self.encoding >= self.public_key.n:
@@ -538,8 +507,8 @@ class EncodedNumber(object):
             try:
                 return mantissa / self.BASE ** -self.exponent
             except OverflowError as e:
-                raise OverflowError(
-                    'decoded result too large for a float') from e
+                raise OverflowError('decoded result too large for a float') from e
+                # return 0
 
     def decrease_exponent_to(self, new_exp):
 
@@ -851,54 +820,24 @@ class PaillierPrivateKey(object):
         return hash((self.p, self.q))
 
 
+# ------------------------------- End of the phe Library ------------------------------- #
+    
+n = 4459262300547858904658930414020825434987219645034206439443309803892354203401695292452650710089733576285085079516053137623734239796365092847130309448167252790605675345863865748471810427958631308784281532621422186125191933571399598154685591274370659718970896072116865398065589138659731186658973843782196515455322379921320592828587864328464547386279346810498157626667827913205594046034383834939455698273513557709386123596698993743863842679298718644481233825575395163958007706588797559411305883553975318221459211423461420529152990913433112849572384386804123734761363552718959437055418832197055385414943422505484239999089162219562068522109177849100249708358542458923150856429379796299256974841048572160226373252945955131632712424627098378112174714867575395358724941466765870764414110422553375792454964713950936872164015189333071767245946141940687491603580695369476126822861715535480066593358047938092090755328499707527005214935663
 
+public_key = PaillierPublicKey(n)
+aggregation = 0
 
-
-
-
-
-
-
-
-
-
-
-
-
-from operator import itemgetter
-import sys
-
-current_word = None
-current_count = 0
-word = None
-
-# input comes from STDIN
 for line in sys.stdin:
-    # remove leading and trailing whitespace
-    line = line.strip()
+    lineNumber = int(line.strip())
+    lineClass = EncryptedNumber(public_key, lineNumber)
+    aggregation += lineClass
 
-    # parse the input we got from mapper.py
-    word, count = line.split('\t', 1)
 
-    # convert count (currently a string) to int
-    try:
-        count = int(count)
-    except ValueError:
-        # count was not a number, so silently
-        # ignore/discard this line
-        continue
+#----------------data receiver----------------#
+p = 2035371799199481933591012944125913537544717038199894135285584303032087934092423767158010434690226923924714014047467862645305314468873957260749852237221792179720372232027896648442209422120679409207055326926507314755403716103439909241935841525642892718085985786636970867011378396675800591346793298313965152930077200879449416449263530512493234654100208923733575494460700571944886333118624114776207617005278495000571104744401657977430632580459621725493810701384810641
 
-    # this IF-switch only works because Hadoop sorts map output
-    # by key (here: word) before it is passed to the reducer
-    if current_word == word:
-        current_count += count
-    else:
-        if current_word:
-            # write result to STDOUT
-            print('%s\t%s' % (current_word, current_count))
-        current_count = count
-        current_word = word
+q = 2190883406315102062831877231503263335219456522549015395315378295711972865475612430029022054841572044292181228008248544271364933039519449383891542675962892047611242265275523884201084878531939977346718100224688427714408095322674707450064503237102721124786192712922509622950729774079863672943482539138549656900909786154475902425538624479516579105128818794805293381337328637435196360605425396227593162234764283964869760442808843709989186358431493687328263216916454143
 
-# do not forget to output the last word if needed!
-if current_word == word:
-    print('%s\t%s' % (current_word, current_count))
+private_key = PaillierPrivateKey(public_key, p, q)
+print('%s' % str(private_key.decrypt(aggregation)))
+
