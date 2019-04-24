@@ -1,13 +1,9 @@
 #!/usr/bin/python3
 
-
-
-
-
-
+#------------------------------- Begin of the phe Library -------------------------------#
 import fractions
 import math
-# import sys
+import sys
 
 
 import os
@@ -335,531 +331,498 @@ first_primes = [
 ]
 
 
-# def miller_rabin(n, k):
+def miller_rabin(n, k):
+    assert n > 3
+    d = n-1
+    r = 0
+    while d % 2 == 0:
+        d //= 2
+        r += 1
+    assert n-1 == d * 2**r
+    assert d % 2 == 1
+    for _ in range(k):  # each iteration divides risk of false prime by 4
+        a = random.randint(2, n-2)  # choose a random witness
+        x = pow(a, d, n)
+        if x == 1 or x == n-1:
+            continue  # go to next witness
+
+        for _ in range(1, r):
+            x = x*x % n
+            if x == n-1:
+                break   # go to next witness
+        else:
+            return False
+    return True
+
+
+def is_prime(n, mr_rounds=25):
+    if n <= first_primes[-1]:
+        return n in first_primes
+    # for small dividors (relatively frequent), euclidean division is best
+    for p in first_primes:
+        if n % p == 0:
+            return False
+    return miller_rabin(n, mr_rounds)
+
+
+try:
+    from collections.abc import Mapping
+except ImportError:
+    Mapping = dict
+
+DEFAULT_KEYSIZE = 3072
+
+def generate_paillier_keypair(private_keyring=None, n_length=DEFAULT_KEYSIZE):
+
+    p = q = n = None
+    n_len = 0
+    while n_len != n_length:
+        p = getprimeover(n_length // 2)
+        q = p
+        while q == p:
+            q = getprimeover(n_length // 2)
+        n = p * q
+        n_len = n.bit_length()
+
+    public_key = PaillierPublicKey(n)
+    private_key = PaillierPrivateKey(public_key, p, q)
+
+    if private_keyring is not None:
+        private_keyring.add(private_key)
+
+    return public_key, private_key
+
+
+
+class PaillierPrivateKeyring(Mapping):
+    def __init__(self, private_keys=None):
+        if private_keys is None:
+            private_keys = []
+        public_keys = [k.public_key for k in private_keys]
+        self.__keyring = dict(zip(public_keys, private_keys))
+    def __getitem__(self, key):
+        return self.__keyring[key]
+
+    def __len__(self):
+        return len(self.__keyring)
+
+    def __iter__(self):
+        return iter(self.__keyring)
+
+    def __delitem__(self, public_key):
+        del self.__keyring[public_key]
+
+    def add(self, private_key):
+
+        if not isinstance(private_key, PaillierPrivateKey):
+            raise TypeError("private_key should be of type PaillierPrivateKey, "
+                            "not %s" % type(private_key))
+        self.__keyring[private_key.public_key] = private_key
+
+    def decrypt(self, encrypted_number):
+
+        relevant_private_key = self.__keyring[encrypted_number.public_key]
+        return relevant_private_key.decrypt(encrypted_number)
+
+
+class EncodedNumber(object):
+
+    BASE = 16
+
+    LOG2_BASE = math.log(BASE, 2)
+    FLOAT_MANTISSA_BITS = sys.float_info.mant_dig
+
+    def __init__(self, public_key, encoding, exponent):
+        self.public_key = public_key
+        self.encoding = encoding
+        self.exponent = exponent
+
+    @classmethod
+    def encode(cls, public_key, scalar, precision=None, max_exponent=None):
+
+        # Calculate the maximum exponent for desired precision
+        if precision is None:
+            if isinstance(scalar, int):
+                prec_exponent = 0
+            elif isinstance(scalar, float):
+                # Encode with *at least* as much precision as the python float
+                # What's the base-2 exponent on the float?
+                bin_flt_exponent = math.frexp(scalar)[1]
+
+                # What's the base-2 exponent of the least significant bit?
+                # The least significant bit has value 2 ** bin_lsb_exponent
+                bin_lsb_exponent = bin_flt_exponent - cls.FLOAT_MANTISSA_BITS
+
+                # What's the corresponding base BASE exponent? Round that down.
+                prec_exponent = math.floor(bin_lsb_exponent / cls.LOG2_BASE)
+            else:
+                raise TypeError("Don't know the precision of type %s."
+                                % type(scalar))
+        else:
+            prec_exponent = math.floor(math.log(precision, cls.BASE))
+
+        # Remember exponents are negative for numbers < 1.
+        # If we're going to store numbers with a more negative
+        # exponent than demanded by the precision, then we may
+        # as well bump up the actual precision.
+        if max_exponent is None:
+            exponent = prec_exponent
+        else:
+            exponent = min(max_exponent, prec_exponent)
+
+        # Use rationals instead of floats to avoid overflow.
+        int_rep = round(fractions.Fraction(scalar)
+                        * fractions.Fraction(cls.BASE) ** -exponent)
+
+        if abs(int_rep) > public_key.max_int:
+            raise ValueError('Integer needs to be within +/- %d but got %d'
+                             % (public_key.max_int, int_rep))
+
+        # Wrap negative numbers by adding n
+        return cls(public_key, int_rep % public_key.n, exponent)
+    #
+    def decode(self):
+
+        if self.encoding >= self.public_key.n:
+            # Should be mod n
+            raise ValueError('Attempted to decode corrupted number')
+        elif self.encoding <= self.public_key.max_int:
+            # Positive
+            mantissa = self.encoding
+        elif self.encoding >= self.public_key.n - self.public_key.max_int:
+            # Negative
+            mantissa = self.encoding - self.public_key.n
+        else:
+            raise OverflowError('Overflow detected in decrypted number')
+
+        if self.exponent >= 0:
+            # Integer multiplication. This is exact.
+            return mantissa * self.BASE ** self.exponent
+        else:
+            # BASE ** -e is an integer, so below is a division of ints.
+            # Not coercing mantissa to float prevents some overflows.
+            try:
+                return mantissa / self.BASE ** -self.exponent
+            except OverflowError as e:
+                raise OverflowError('decoded result too large for a float') from e
+                # return 0
+
+    def decrease_exponent_to(self, new_exp):
+
+        if new_exp > self.exponent:
+            raise ValueError('New exponent %i should be more negative than'
+                             'old exponent %i' % (new_exp, self.exponent))
+        factor = pow(self.BASE, self.exponent - new_exp)
+        new_enc = self.encoding * factor % self.public_key.n
+        return self.__class__(self.public_key, new_enc, new_exp)
+
+
+class PaillierPublicKey(object):
+
+    def __init__(self, n):
+        self.g = n + 1
+        self.n = n
+        self.nsquare = n * n
+        self.max_int = n // 3 - 1
+
+    def __repr__(self):
+        publicKeyHash = hex(hash(self))[2:]
+        return "<PaillierPublicKey {}>".format(publicKeyHash[:10])
+
+    def __eq__(self, other):
+        return self.n == other.n
+
+    def __hash__(self):
+        return hash(self.n)
+
+    def raw_encrypt(self, plaintext, r_value=None):
+
+        if not isinstance(plaintext, int):
+            raise TypeError('Expected int type plaintext but got: %s' %
+                            type(plaintext))
+
+        if self.n - self.max_int <= plaintext < self.n:
+            # Very large plaintext, take a sneaky shortcut using inverses
+            neg_plaintext = self.n - plaintext  # = abs(plaintext - nsquare)
+            neg_ciphertext = (self.n * neg_plaintext + 1) % self.nsquare
+            nude_ciphertext = invert(neg_ciphertext, self.nsquare)
+        else:
+            # we chose g = n + 1, so that we can exploit the fact that
+            # (n+1)^plaintext = n*plaintext + 1 mod n^2
+            nude_ciphertext = (self.n * plaintext + 1) % self.nsquare
+
+        r = r_value or self.get_random_lt_n()
+        obfuscator = powmod(r, self.n, self.nsquare)
+
+        return (nude_ciphertext * obfuscator) % self.nsquare
+
+    def get_random_lt_n(self):
+
+        return random.SystemRandom().randrange(1, self.n)
+
+    def encrypt(self, value, precision=None, r_value=None):
+
+
+        if isinstance(value, EncodedNumber):
+            encoding = value
+        else:
+            encoding = EncodedNumber.encode(self, value, precision)
+
+        return self.encrypt_encoded(encoding, r_value)
+
+    def encrypt_encoded(self, encoding, r_value):
+
+        # If r_value is None, obfuscate in a call to .obfuscate() (below)
+        obfuscator = r_value or 1
+        ciphertext = self.raw_encrypt(encoding.encoding, r_value=obfuscator)
+        # print("ciphertext: ")
+        # print(ciphertext)
+        # print("encoding.exponent:")
+        # print(encoding.exponent)
+        encrypted_number = EncryptedNumber(self, ciphertext, encoding.exponent)
+        # print(ciphertext)
+        if r_value is None:
+            encrypted_number.obfuscate()
+        return encrypted_number
+
+
+class EncryptedNumber(object):
+
+    def __init__(self, public_key, ciphertext, exponent=0):
+        self.public_key = public_key
+        self.__ciphertext = ciphertext
+        self.exponent = exponent
+        self.__is_obfuscated = False
+        if isinstance(self.ciphertext, EncryptedNumber):
+            raise TypeError('ciphertext should be an integer')
+        if not isinstance(self.public_key, PaillierPublicKey):
+            raise TypeError('public_key should be a PaillierPublicKey')
+
+    def get_ciphertext(self):
+        return self.__ciphertext
+
+    def __add__(self, other):
+
+        if isinstance(other, EncryptedNumber):
+            return self._add_encrypted(other)
+        elif isinstance(other, EncodedNumber):
+            return self._add_encoded(other)
+        else:
+            return self._add_scalar(other)
+
+    def __radd__(self, other):
 
-#     assert n > 3
+        return self.__add__(other)
 
-#     # find r and d such that n-1 = 2^r × d
-#     d = n-1
-#     r = 0
-#     while d % 2 == 0:
-#         d //= 2
-#         r += 1
-#     assert n-1 == d * 2**r
-#     assert d % 2 == 1
+    def __mul__(self, other):
 
-#     for _ in range(k):  # each iteration divides risk of false prime by 4
-#         a = random.randint(2, n-2)  # choose a random witness
+        if isinstance(other, EncryptedNumber):
+            raise NotImplementedError('Good luck with that...')
 
-#         x = pow(a, d, n)
-#         if x == 1 or x == n-1:
-#             continue  # go to next witness
+        if isinstance(other, EncodedNumber):
+            encoding = other
+        else:
+            encoding = EncodedNumber.encode(self.public_key, other)
+        product = self._raw_mul(encoding.encoding)
+        exponent = self.exponent + encoding.exponent
+
+        return EncryptedNumber(self.public_key, product, exponent)
 
-#         for _ in range(1, r):
-#             x = x*x % n
-#             if x == n-1:
-#                 break   # go to next witness
-#         else:
-#             return False
-#     return True
+    def __rmul__(self, other):
+        return self.__mul__(other)
 
+    def __sub__(self, other):
+        return self + (other * -1)
 
-# def is_prime(n, mr_rounds=25):
+    def __rsub__(self, other):
+        return other + (self * -1)
+
+    def __truediv__(self, scalar):
+        return self.__mul__(1 / scalar)
+
+    def ciphertext(self, be_secure=True):
+
+        if be_secure and not self.__is_obfuscated:
+            self.obfuscate()
+
+        return self.__ciphertext
+
+    def decrease_exponent_to(self, new_exp):
+
+        if new_exp > self.exponent:
+            raise ValueError('New exponent %i should be more negative than '
+                             'old exponent %i' % (new_exp, self.exponent))
+        multiplied = self * pow(EncodedNumber.BASE, self.exponent - new_exp)
+        multiplied.exponent = new_exp
+        return multiplied
+
+    def obfuscate(self):
+
+        r = self.public_key.get_random_lt_n()
+        r_pow_n = powmod(r, self.public_key.n, self.public_key.nsquare)
+        self.__ciphertext = self.__ciphertext * r_pow_n % self.public_key.nsquare
+        self.__is_obfuscated = True
+
+    def _add_scalar(self, scalar):
+
+        encoded = EncodedNumber.encode(self.public_key, scalar,
+                                       max_exponent=self.exponent)
+
+        return self._add_encoded(encoded)
+
+    def _add_encoded(self, encoded):
+
+        if self.public_key != encoded.public_key:
+            raise ValueError("Attempted to add numbers encoded against "
+                             "different public keys!")
+
+        # In order to add two numbers, their exponents must match.
+        a, b = self, encoded
+        if a.exponent > b.exponent:
+            a = self.decrease_exponent_to(b.exponent)
+        elif a.exponent < b.exponent:
+            b = b.decrease_exponent_to(a.exponent)
+
+        # Don't bother to salt/obfuscate in a basic operation, do it
+        # just before leaving the computer.
+        encrypted_scalar = a.public_key.raw_encrypt(b.encoding, 1)
+
+        sum_ciphertext = a._raw_add(a.ciphertext(False), encrypted_scalar)
+        return EncryptedNumber(a.public_key, sum_ciphertext, a.exponent)
+
+    def _add_encrypted(self, other):
+
+        if self.public_key != other.public_key:
+            raise ValueError("Attempted to add numbers encrypted against "
+                             "different public keys!")
+
+        # In order to add two numbers, their exponents must match.
+        a, b = self, other
+        if a.exponent > b.exponent:
+            a = self.decrease_exponent_to(b.exponent)
+        elif a.exponent < b.exponent:
+            b = b.decrease_exponent_to(a.exponent)
 
-#     # as an optimization we quickly detect small primes using the list above
-#     if n <= first_primes[-1]:
-#         return n in first_primes
-#     # for small dividors (relatively frequent), euclidean division is best
-#     for p in first_primes:
-#         if n % p == 0:
-#             return False
-#     # the actual generic test; give a false prime with probability 2⁻⁵⁰
-#     return miller_rabin(n, mr_rounds)
+        sum_ciphertext = a._raw_add(a.ciphertext(False), b.ciphertext(False))
+        return EncryptedNumber(a.public_key, sum_ciphertext, a.exponent)
 
+    def _raw_add(self, e_a, e_b):
 
-# try:
-#     from collections.abc import Mapping
-# except ImportError:
-#     Mapping = dict
+        return e_a * e_b % self.public_key.nsquare
 
-# # from phe import EncodedNumber
-# # from phe.util import invert, powmod, getprimeover, isqrt
+    def _raw_mul(self, plaintext):
 
-# # Paillier cryptosystem is based on integer factorisation.
-# # The default is chosen to give a minimum of 128 bits of security.
-# # https://www.keylength.com/en/4/
-# DEFAULT_KEYSIZE = 3072
+        if not isinstance(plaintext, int):
+            raise TypeError('Expected ciphertext to be int, not %s' %
+                type(plaintext))
 
+        if plaintext < 0 or plaintext >= self.public_key.n:
+            raise ValueError('Scalar out of bounds: %i' % plaintext)
 
-# def generate_paillier_keypair(private_keyring=None, n_length=DEFAULT_KEYSIZE):
+        if self.public_key.n - self.public_key.max_int <= plaintext:
+            # Very large plaintext, play a sneaky trick using inverses
+            neg_c = invert(self.ciphertext(False), self.public_key.nsquare)
+            neg_scalar = self.public_key.n - plaintext
+            return powmod(neg_c, neg_scalar, self.public_key.nsquare)
+        else:
+            return powmod(self.ciphertext(False), plaintext, self.public_key.nsquare)
 
-#     p = q = n = None
-#     n_len = 0
-#     while n_len != n_length:
-#         p = getprimeover(n_length // 2)
-#         q = p
-#         while q == p:
-#             q = getprimeover(n_length // 2)
-#         n = p * q
-#         n_len = n.bit_length()
 
-#     # print("n: ")
-#     # print(n)
-#     # print("p: ")
-#     # print(p)
-#     # print("q: ")
-#     # print(q)
+class PaillierPrivateKey(object):
 
-#     public_key = PaillierPublicKey(n)
-#     private_key = PaillierPrivateKey(public_key, p, q)
+    def __init__(self, public_key, p, q):
+        if not p*q == public_key.n:
+            raise ValueError('given public key does not match the given p and q.')
+        if p == q:
+            # check that p and q are different, otherwise we can't compute p^-1 mod q
+            raise ValueError('p and q have to be different')
+        self.public_key = public_key
+        if q < p: #ensure that p < q.
+            self.p = q
+            self.q = p
+        else:
+            self.p = p
+            self.q = q
+        self.psquare = self.p * self.p
 
-#     if private_keyring is not None:
-#         private_keyring.add(private_key)
+        self.qsquare = self.q * self.q
+        self.p_inverse = invert(self.p, self.q)
+        self.hp = self.h_function(self.p, self.psquare)
+        self.hq = self.h_function(self.q, self.qsquare)
 
-#     return public_key, private_key
+    @staticmethod
+    def from_totient(public_key, totient):
 
+        p_plus_q = public_key.n - totient + 1
+        p_minus_q = isqrt(p_plus_q * p_plus_q - public_key.n * 4)
+        q = (p_plus_q - p_minus_q) // 2
+        p = p_plus_q - q
+        if not p*q == public_key.n:
+            raise ValueError('given public key and totient do not match.')
+        return PaillierPrivateKey(public_key, p, q)
 
+    def __repr__(self):
+        pub_repr = repr(self.public_key)
+        return "<PaillierPrivateKey for {}>".format(pub_repr)
 
-# class PaillierPrivateKeyring(Mapping):
-
-#     def __init__(self, private_keys=None):
-#         if private_keys is None:
-#             private_keys = []
-#         public_keys = [k.public_key for k in private_keys]
-#         self.__keyring = dict(zip(public_keys, private_keys))
-
-#     def __getitem__(self, key):
-#         return self.__keyring[key]
-
-#     def __len__(self):
-#         return len(self.__keyring)
-
-#     def __iter__(self):
-#         return iter(self.__keyring)
-
-#     def __delitem__(self, public_key):
-#         del self.__keyring[public_key]
-
-#     def add(self, private_key):
-
-#         if not isinstance(private_key, PaillierPrivateKey):
-#             raise TypeError("private_key should be of type PaillierPrivateKey, "
-#                             "not %s" % type(private_key))
-#         self.__keyring[private_key.public_key] = private_key
-
-#     def decrypt(self, encrypted_number):
-
-#         relevant_private_key = self.__keyring[encrypted_number.public_key]
-#         return relevant_private_key.decrypt(encrypted_number)
-
-
-# class EncodedNumber(object):
-
-#     BASE = 16
-
-#     LOG2_BASE = math.log(BASE, 2)
-#     FLOAT_MANTISSA_BITS = sys.float_info.mant_dig
-
-#     def __init__(self, public_key, encoding, exponent):
-#         self.public_key = public_key
-#         self.encoding = encoding
-#         self.exponent = exponent
-
-#     @classmethod
-#     def encode(cls, public_key, scalar, precision=None, max_exponent=None):
-
-#         # Calculate the maximum exponent for desired precision
-#         if precision is None:
-#             if isinstance(scalar, int):
-#                 prec_exponent = 0
-#             elif isinstance(scalar, float):
-#                 # Encode with *at least* as much precision as the python float
-#                 # What's the base-2 exponent on the float?
-#                 bin_flt_exponent = math.frexp(scalar)[1]
-
-#                 # What's the base-2 exponent of the least significant bit?
-#                 # The least significant bit has value 2 ** bin_lsb_exponent
-#                 bin_lsb_exponent = bin_flt_exponent - cls.FLOAT_MANTISSA_BITS
-
-#                 # What's the corresponding base BASE exponent? Round that down.
-#                 prec_exponent = math.floor(bin_lsb_exponent / cls.LOG2_BASE)
-#             else:
-#                 raise TypeError("Don't know the precision of type %s."
-#                                 % type(scalar))
-#         else:
-#             prec_exponent = math.floor(math.log(precision, cls.BASE))
-
-#         # Remember exponents are negative for numbers < 1.
-#         # If we're going to store numbers with a more negative
-#         # exponent than demanded by the precision, then we may
-#         # as well bump up the actual precision.
-#         if max_exponent is None:
-#             exponent = prec_exponent
-#         else:
-#             exponent = min(max_exponent, prec_exponent)
-
-#         # Use rationals instead of floats to avoid overflow.
-#         int_rep = round(fractions.Fraction(scalar)
-#                         * fractions.Fraction(cls.BASE) ** -exponent)
+    def decrypt(self, encrypted_number):
 
-#         if abs(int_rep) > public_key.max_int:
-#             raise ValueError('Integer needs to be within +/- %d but got %d'
-#                              % (public_key.max_int, int_rep))
-
-#         # Wrap negative numbers by adding n
-#         return cls(public_key, int_rep % public_key.n, exponent)
-
-#     def decode(self):
-
-#         if self.encoding >= self.public_key.n:
-#             # Should be mod n
-#             raise ValueError('Attempted to decode corrupted number')
-#         elif self.encoding <= self.public_key.max_int:
-#             # Positive
-#             mantissa = self.encoding
-#         elif self.encoding >= self.public_key.n - self.public_key.max_int:
-#             # Negative
-#             mantissa = self.encoding - self.public_key.n
-#         else:
-#             raise OverflowError('Overflow detected in decrypted number')
-
-#         if self.exponent >= 0:
-#             # Integer multiplication. This is exact.
-#             return mantissa * self.BASE ** self.exponent
-#         else:
-#             # BASE ** -e is an integer, so below is a division of ints.
-#             # Not coercing mantissa to float prevents some overflows.
-#             try:
-#                 return mantissa / self.BASE ** -self.exponent
-#             except OverflowError as e:
-#                 raise OverflowError(
-#                     'decoded result too large for a float') from e
-
-#     def decrease_exponent_to(self, new_exp):
-
-#         if new_exp > self.exponent:
-#             raise ValueError('New exponent %i should be more negative than'
-#                              'old exponent %i' % (new_exp, self.exponent))
-#         factor = pow(self.BASE, self.exponent - new_exp)
-#         new_enc = self.encoding * factor % self.public_key.n
-#         return self.__class__(self.public_key, new_enc, new_exp)
-
-
-# class PaillierPublicKey(object):
-
-#     def __init__(self, n):
-#         self.g = n + 1
-#         self.n = n
-#         self.nsquare = n * n
-#         self.max_int = n // 3 - 1
-
-#     def __repr__(self):
-#         publicKeyHash = hex(hash(self))[2:]
-#         return "<PaillierPublicKey {}>".format(publicKeyHash[:10])
-
-#     def __eq__(self, other):
-#         return self.n == other.n
+        encoded = self.decrypt_encoded(encrypted_number)
+        return encoded.decode()
 
-#     def __hash__(self):
-#         return hash(self.n)
+    def decrypt_encoded(self, encrypted_number, Encoding=None):
 
-#     def raw_encrypt(self, plaintext, r_value=None):
-
-#         if not isinstance(plaintext, int):
-#             raise TypeError('Expected int type plaintext but got: %s' %
-#                             type(plaintext))
+        if not isinstance(encrypted_number, EncryptedNumber):
+            raise TypeError('Expected encrypted_number to be an EncryptedNumber'
+                            ' not: %s' % type(encrypted_number))
 
-#         if self.n - self.max_int <= plaintext < self.n:
-#             # Very large plaintext, take a sneaky shortcut using inverses
-#             neg_plaintext = self.n - plaintext  # = abs(plaintext - nsquare)
-#             neg_ciphertext = (self.n * neg_plaintext + 1) % self.nsquare
-#             nude_ciphertext = invert(neg_ciphertext, self.nsquare)
-#         else:
-#             # we chose g = n + 1, so that we can exploit the fact that
-#             # (n+1)^plaintext = n*plaintext + 1 mod n^2
-#             nude_ciphertext = (self.n * plaintext + 1) % self.nsquare
+        if self.public_key != encrypted_number.public_key:
+            raise ValueError('encrypted_number was encrypted against a '
+                             'different key!')
 
-#         r = r_value or self.get_random_lt_n()
-#         obfuscator = powmod(r, self.n, self.nsquare)
+        if Encoding is None:
+            Encoding = EncodedNumber
 
-#         return (nude_ciphertext * obfuscator) % self.nsquare
+        encoded = self.raw_decrypt(encrypted_number.ciphertext(be_secure=False))
+        return Encoding(self.public_key, encoded,
+                             encrypted_number.exponent)
 
-#     def get_random_lt_n(self):
+    def raw_decrypt(self, ciphertext):
 
-#         return random.SystemRandom().randrange(1, self.n)
+        if not isinstance(ciphertext, int):
+            raise TypeError('Expected ciphertext to be an int, not: %s' %
+                type(ciphertext))
 
-#     def encrypt(self, value, precision=None, r_value=None):
+        decrypt_to_p = self.l_function(powmod(ciphertext, self.p-1, self.psquare), self.p) * self.hp % self.p
+        decrypt_to_q = self.l_function(powmod(ciphertext, self.q-1, self.qsquare), self.q) * self.hq % self.q
+        return self.crt(decrypt_to_p, decrypt_to_q)
 
+    def h_function(self, x, xsquare):
 
-#         if isinstance(value, EncodedNumber):
-#             encoding = value
-#         else:
-#             encoding = EncodedNumber.encode(self, value, precision)
+        return invert(self.l_function(powmod(self.public_key.g, x - 1, xsquare),x), x)
 
-#         return self.encrypt_encoded(encoding, r_value)
+    def l_function(self, x, p):
 
-#     def encrypt_encoded(self, encoding, r_value):
+        return (x - 1) // p
 
-#         # If r_value is None, obfuscate in a call to .obfuscate() (below)
-#         obfuscator = r_value or 1
-#         ciphertext = self.raw_encrypt(encoding.encoding, r_value=obfuscator)
-#         # print("ciphertext: ")
-#         # print(ciphertext)
-#         # print("encoding.exponent:")
-#         # print(encoding.exponent)
-#         encrypted_number = EncryptedNumber(self, ciphertext, encoding.exponent)
-#         # print(ciphertext)
-#         if r_value is None:
-#             encrypted_number.obfuscate()
-#         return encrypted_number
+    def crt(self, mp, mq):
 
+        u = (mq - mp) * self.p_inverse % self.q
+        return mp + (u * self.p)
 
-# class EncryptedNumber(object):
+    def __eq__(self, other):
+        return self.p == other.p and self.q == other.q
 
-#     def __init__(self, public_key, ciphertext, exponent=0):
-#         self.public_key = public_key
-#         self.__ciphertext = ciphertext
-#         self.exponent = exponent
-#         self.__is_obfuscated = False
-#         if isinstance(self.ciphertext, EncryptedNumber):
-#             raise TypeError('ciphertext should be an integer')
-#         if not isinstance(self.public_key, PaillierPublicKey):
-#             raise TypeError('public_key should be a PaillierPublicKey')
+    def __hash__(self):
+        return hash((self.p, self.q))
+#------------------------------- End of the phe Library -------------------------------#
+    
 
-#     def get_ciphertext(self):
-#         return self.__ciphertext
+n = 4459262300547858904658930414020825434987219645034206439443309803892354203401695292452650710089733576285085079516053137623734239796365092847130309448167252790605675345863865748471810427958631308784281532621422186125191933571399598154685591274370659718970896072116865398065589138659731186658973843782196515455322379921320592828587864328464547386279346810498157626667827913205594046034383834939455698273513557709386123596698993743863842679298718644481233825575395163958007706588797559411305883553975318221459211423461420529152990913433112849572384386804123734761363552718959437055418832197055385414943422505484239999089162219562068522109177849100249708358542458923150856429379796299256974841048572160226373252945955131632712424627098378112174714867575395358724941466765870764414110422553375792454964713950936872164015189333071767245946141940687491603580695369476126822861715535480066593358047938092090755328499707527005214935663
 
-#     def __add__(self, other):
+public_key = PaillierPublicKey(n)
 
-#         if isinstance(other, EncryptedNumber):
-#             return self._add_encrypted(other)
-#         elif isinstance(other, EncodedNumber):
-#             return self._add_encoded(other)
-#         else:
-#             return self._add_scalar(other)
-
-#     def __radd__(self, other):
-
-#         return self.__add__(other)
-
-#     def __mul__(self, other):
-
-#         if isinstance(other, EncryptedNumber):
-#             raise NotImplementedError('Good luck with that...')
-
-#         if isinstance(other, EncodedNumber):
-#             encoding = other
-#         else:
-#             encoding = EncodedNumber.encode(self.public_key, other)
-#         product = self._raw_mul(encoding.encoding)
-#         exponent = self.exponent + encoding.exponent
-
-#         return EncryptedNumber(self.public_key, product, exponent)
-
-#     def __rmul__(self, other):
-#         return self.__mul__(other)
-
-#     def __sub__(self, other):
-#         return self + (other * -1)
-
-#     def __rsub__(self, other):
-#         return other + (self * -1)
-
-#     def __truediv__(self, scalar):
-#         return self.__mul__(1 / scalar)
-
-#     def ciphertext(self, be_secure=True):
-
-#         if be_secure and not self.__is_obfuscated:
-#             self.obfuscate()
-
-#         return self.__ciphertext
-
-#     def decrease_exponent_to(self, new_exp):
-
-#         if new_exp > self.exponent:
-#             raise ValueError('New exponent %i should be more negative than '
-#                              'old exponent %i' % (new_exp, self.exponent))
-#         multiplied = self * pow(EncodedNumber.BASE, self.exponent - new_exp)
-#         multiplied.exponent = new_exp
-#         return multiplied
-
-#     def obfuscate(self):
-
-#         r = self.public_key.get_random_lt_n()
-#         r_pow_n = powmod(r, self.public_key.n, self.public_key.nsquare)
-#         self.__ciphertext = self.__ciphertext * r_pow_n % self.public_key.nsquare
-#         self.__is_obfuscated = True
-
-#     def _add_scalar(self, scalar):
-
-#         encoded = EncodedNumber.encode(self.public_key, scalar,
-#                                        max_exponent=self.exponent)
-
-#         return self._add_encoded(encoded)
-
-#     def _add_encoded(self, encoded):
-
-#         if self.public_key != encoded.public_key:
-#             raise ValueError("Attempted to add numbers encoded against "
-#                              "different public keys!")
-
-#         # In order to add two numbers, their exponents must match.
-#         a, b = self, encoded
-#         if a.exponent > b.exponent:
-#             a = self.decrease_exponent_to(b.exponent)
-#         elif a.exponent < b.exponent:
-#             b = b.decrease_exponent_to(a.exponent)
-
-#         # Don't bother to salt/obfuscate in a basic operation, do it
-#         # just before leaving the computer.
-#         encrypted_scalar = a.public_key.raw_encrypt(b.encoding, 1)
-
-#         sum_ciphertext = a._raw_add(a.ciphertext(False), encrypted_scalar)
-#         return EncryptedNumber(a.public_key, sum_ciphertext, a.exponent)
-
-#     def _add_encrypted(self, other):
-
-#         if self.public_key != other.public_key:
-#             raise ValueError("Attempted to add numbers encrypted against "
-#                              "different public keys!")
-
-#         # In order to add two numbers, their exponents must match.
-#         a, b = self, other
-#         if a.exponent > b.exponent:
-#             a = self.decrease_exponent_to(b.exponent)
-#         elif a.exponent < b.exponent:
-#             b = b.decrease_exponent_to(a.exponent)
-
-#         sum_ciphertext = a._raw_add(a.ciphertext(False), b.ciphertext(False))
-#         return EncryptedNumber(a.public_key, sum_ciphertext, a.exponent)
-
-#     def _raw_add(self, e_a, e_b):
-
-#         return e_a * e_b % self.public_key.nsquare
-
-#     def _raw_mul(self, plaintext):
-
-#         if not isinstance(plaintext, int):
-#             raise TypeError('Expected ciphertext to be int, not %s' %
-#                 type(plaintext))
-
-#         if plaintext < 0 or plaintext >= self.public_key.n:
-#             raise ValueError('Scalar out of bounds: %i' % plaintext)
-
-#         if self.public_key.n - self.public_key.max_int <= plaintext:
-#             # Very large plaintext, play a sneaky trick using inverses
-#             neg_c = invert(self.ciphertext(False), self.public_key.nsquare)
-#             neg_scalar = self.public_key.n - plaintext
-#             return powmod(neg_c, neg_scalar, self.public_key.nsquare)
-#         else:
-#             return powmod(self.ciphertext(False), plaintext, self.public_key.nsquare)
-
-
-# class PaillierPrivateKey(object):
-
-#     def __init__(self, public_key, p, q):
-#         if not p*q == public_key.n:
-#             raise ValueError('given public key does not match the given p and q.')
-#         if p == q:
-#             # check that p and q are different, otherwise we can't compute p^-1 mod q
-#             raise ValueError('p and q have to be different')
-#         self.public_key = public_key
-#         if q < p: #ensure that p < q.
-#             self.p = q
-#             self.q = p
-#         else:
-#             self.p = p
-#             self.q = q
-#         self.psquare = self.p * self.p
-
-#         self.qsquare = self.q * self.q
-#         self.p_inverse = invert(self.p, self.q)
-#         self.hp = self.h_function(self.p, self.psquare)
-#         self.hq = self.h_function(self.q, self.qsquare)
-
-#     @staticmethod
-#     def from_totient(public_key, totient):
-
-#         p_plus_q = public_key.n - totient + 1
-#         p_minus_q = isqrt(p_plus_q * p_plus_q - public_key.n * 4)
-#         q = (p_plus_q - p_minus_q) // 2
-#         p = p_plus_q - q
-#         if not p*q == public_key.n:
-#             raise ValueError('given public key and totient do not match.')
-#         return PaillierPrivateKey(public_key, p, q)
-
-#     def __repr__(self):
-#         pub_repr = repr(self.public_key)
-#         return "<PaillierPrivateKey for {}>".format(pub_repr)
-
-#     def decrypt(self, encrypted_number):
-
-#         encoded = self.decrypt_encoded(encrypted_number)
-#         return encoded.decode()
-
-#     def decrypt_encoded(self, encrypted_number, Encoding=None):
-
-#         if not isinstance(encrypted_number, EncryptedNumber):
-#             raise TypeError('Expected encrypted_number to be an EncryptedNumber'
-#                             ' not: %s' % type(encrypted_number))
-
-#         if self.public_key != encrypted_number.public_key:
-#             raise ValueError('encrypted_number was encrypted against a '
-#                              'different key!')
-
-#         if Encoding is None:
-#             Encoding = EncodedNumber
-
-#         encoded = self.raw_decrypt(encrypted_number.ciphertext(be_secure=False))
-#         return Encoding(self.public_key, encoded,
-#                              encrypted_number.exponent)
-
-#     def raw_decrypt(self, ciphertext):
-
-#         if not isinstance(ciphertext, int):
-#             raise TypeError('Expected ciphertext to be an int, not: %s' %
-#                 type(ciphertext))
-
-#         decrypt_to_p = self.l_function(powmod(ciphertext, self.p-1, self.psquare), self.p) * self.hp % self.p
-#         decrypt_to_q = self.l_function(powmod(ciphertext, self.q-1, self.qsquare), self.q) * self.hq % self.q
-#         return self.crt(decrypt_to_p, decrypt_to_q)
-
-#     def h_function(self, x, xsquare):
-
-#         return invert(self.l_function(powmod(self.public_key.g, x - 1, xsquare),x), x)
-
-#     def l_function(self, x, p):
-
-#         return (x - 1) // p
-
-#     def crt(self, mp, mq):
-
-#         u = (mq - mp) * self.p_inverse % self.q
-#         return mp + (u * self.p)
-
-#     def __eq__(self, other):
-#         return self.p == other.p and self.q == other.q
-
-#     def __hash__(self):
-#         return hash((self.p, self.q))
-
-
-
-
-import sys
-
-# input comes from STDIN (standard input)
 for line in sys.stdin:
-    # remove leading and trailing whitespace
-    line = line.strip()
-    # split the line into words
-    words = line.split()
-    # increase counters
-    for word in words:
-        # write the results to STDOUT (standard output);
-        # what we output here will be the input for the
-        # Reduce step, i.e. the input for reducer.py
-        #
-        # tab-delimited; the trivial word count is 1
-        print('%s\t%s' % (word, 1))
+    line = int(line.strip())
+    encryptedLine = public_key.encrypt(line)
+    print('%s' % str(encryptedLine.get_ciphertext()))
